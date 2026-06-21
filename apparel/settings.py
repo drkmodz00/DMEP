@@ -20,10 +20,10 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 DEBUG = True
 
 ALLOWED_HOSTS = [
+    "dmep.onrender.com",
     "localhost",
     "127.0.0.1",
 ]
-
 # ──────────────────────────────────────────────
 # INSTALLED APPS
 # ──────────────────────────────────────────────
