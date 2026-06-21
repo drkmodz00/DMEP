@@ -1,0 +1,653 @@
+import json, uuid
+from decimal import Decimal
+from django.contrib import messages
+from django.shortcuts import render, get_object_or_404, redirect
+from django.http import JsonResponse
+from django.utils import timezone
+from django.db import transaction
+from django.db.models import Q
+from django.core.paginator import Paginator
+from django.views.decorators.http import require_POST
+from datetime import timedelta
+from ..utils.utils import get_guest_id
+
+from ..models import Product, Customer, Sale, SaleItem, Discount, Category, HelpCenter, NewsletterSubscriber, StockMovement
+from ..utils.stock import stock_out, stock_in
+from ..utils.discounts import calculate_discounted_price
+
+
+def dashboard(request):
+    products = Product.objects.filter(status="active")
+    last_order_code = request.session.pop("last_order_code", None)
+
+    sale_products = []
+
+    for product in products:
+        final_price, discount_obj, percent = calculate_discounted_price(product)
+
+        product.final_price = final_price
+        product.discount_percent = percent or 0
+        product.discount_obj = discount_obj
+
+        if discount_obj:
+            sale_products.append(product)
+
+    sale_products = sale_products[:8]
+
+    women = Category.objects.filter(name__iexact="Women").first()
+    men = Category.objects.filter(name__iexact="Men").first()
+    kids = Category.objects.filter(name__iexact="Kids").first()
+
+    return render(request, "customer/dashboard.html", {
+        "sale_products": sale_products,
+        "women_id": women.id if women else None,
+        "men_id": men.id if men else None,
+        "kids_id": kids.id if kids else None,
+        "last_order_code": last_order_code,
+    })
+
+def product_list(request):
+    q = request.GET.get("q", "")
+    category_id = request.GET.get("category")
+
+    products = Product.objects.filter(status="active")
+
+    selected_category = category_id
+    active_parent_id = None
+
+    # SEARCH
+    if q:
+        products = products.filter(Q(name__icontains=q) | Q(sku__icontains=q))
+
+    # CATEGORY FILTER
+    if category_id in [None, "", "None"]:
+        category_id = None
+
+    if category_id:
+        try:
+            category_id = int(category_id)
+
+            selected_cat = Category.objects.get(id=category_id)
+
+            if selected_cat.parent is None:
+                sub_ids = selected_cat.subcategories.values_list("id", flat=True)
+                products = products.filter(
+                    Q(category_id__in=sub_ids) | Q(category_id=selected_cat.id)
+                )
+            else:
+                products = products.filter(category_id=selected_cat.id)
+
+            active_parent_id = selected_cat.parent_id
+
+        except Category.DoesNotExist:
+            pass
+
+    # DISCOUNT CALCULATION
+    product_list = []
+    for product in products:
+        final_price, discount_obj, percent = calculate_discounted_price(product)
+
+        product.final_price = final_price
+        product.discount_percent = percent or 0
+        product.discount_obj = discount_obj
+
+        product_list.append(product)
+
+    # PAGINATION
+    paginator = Paginator(product_list, 12)
+    page_number = request.GET.get("page")
+    page_obj = paginator.get_page(page_number)
+
+    categories = Category.objects.filter(parent__isnull=True).prefetch_related("subcategories")
+
+    return render(request, "customer/shop.html", {
+        "products": page_obj,   # ✅ IMPORTANT FIX
+        "page_obj": page_obj,
+        "categories": categories,
+        "q": q,
+        "selected_category": selected_category,
+        "active_parent_id": active_parent_id,
+    })
+
+def product_detail(request, pk):
+    product = get_object_or_404(Product, pk=pk)
+
+    price, discount, percent = calculate_discounted_price(product)
+
+    return JsonResponse({
+        "id": product.id,
+        "name": product.name,
+        "price": float(price),
+        "stock": product.stock_qty,
+    })
+
+
+def product_search(request):
+    q = request.GET.get("q", "")
+    results = Product.objects.filter(name__icontains=q)
+    return render(request, "customer/search.html", {"results": results})
+
+
+def cart_view(request):
+    cart = request.session.get("cart", {})
+    selected_keys = request.session.get("selected_items")
+
+    if selected_keys is None:
+        selected_keys = list(cart.keys())
+        request.session["selected_items"] = selected_keys
+
+    cart = {str(k): v for k, v in cart.items()}
+    selected_keys = set(str(k) for k in selected_keys)
+
+    # 🔥 CLEAN CART (IMPORTANT FIX)
+    clean_cart = {}
+    for pid, qty in cart.items():
+        if isinstance(qty, dict):
+            qty = qty.get("qty", 1)
+
+        try:
+            qty = int(qty)
+        except:
+            continue
+
+        clean_cart[pid] = qty
+
+    cart = clean_cart
+    request.session["cart"] = cart
+
+    cart_items = []
+    subtotal = Decimal("0.00")
+    discount_total = Decimal("0.00")
+
+    for pid, qty in cart.items():
+        product = Product.objects.get(id=pid)
+
+        final_price, _, _ = calculate_discounted_price(product)
+
+        final_price = Decimal(str(final_price))
+        selling_price = Decimal(str(product.selling_price or 0))
+
+        line_original = selling_price * qty
+        line_final = final_price * qty
+        line_discount = line_original - line_final
+
+        is_selected = pid in selected_keys
+
+        if is_selected:
+            subtotal += line_original
+            discount_total += line_discount
+
+        cart_items.append({
+            "key": pid,
+            "name": product.name,
+            "image": product.img.url if product.img and product.img.name else None,
+            "price": final_price,
+            "qty": qty,
+            "total": line_final,
+            "discount": line_discount,
+            "selected": is_selected,
+        })
+
+    total_amount = subtotal - discount_total
+
+    return render(request, "customer/cart.html", {
+        "cart_items": cart_items,
+        "subtotal": subtotal,
+        "discount_total": discount_total,
+        "total_amount": total_amount,
+    })
+
+def add_to_cart(request, product_id):
+    cart = request.session.get("cart", {})
+    pid = str(product_id)
+    cart[pid] = cart.get(pid, 0) + 1
+    request.session["cart"] = cart
+    request.session.modified = True
+    cart_count = sum(cart.values())
+    return JsonResponse({
+        "success": True,
+        "cart_count": cart_count
+    })
+    
+def update_cart(request, product_id, action):
+    cart = request.session.get("cart", {})
+    pid = str(product_id)
+
+    if pid in cart:
+        if action == "increase":
+            cart[pid] += 1
+        elif action == "decrease":
+            cart[pid] -= 1
+
+        if cart[pid] <= 0:
+            del cart[pid]
+
+    request.session["cart"] = cart
+    request.session.modified = True
+
+    return JsonResponse({
+        "status": "ok",
+        "cart": cart    
+    })
+
+def remove_from_cart(request, product_id):
+    cart = request.session.get("cart", {})
+    cart.pop(str(product_id), None)
+
+    request.session["cart"] = cart
+    request.session.modified = True
+
+    return JsonResponse({
+        "status": "ok",
+        "cart": cart,
+    })
+
+def clear_cart(request):
+    request.session["cart"] = {}
+    request.session["selected_items"] = []
+    request.session.modified = True
+    return redirect("cart")
+
+def reset_session(request):
+    request.session.flush()
+    return redirect("dashboard")
+    
+@require_POST
+def update_selected_items(request):
+    import json
+    from decimal import Decimal
+
+    data = json.loads(request.body)
+    selected = set(str(i) for i in data.get("selected", []))
+
+    request.session["selected_items"] = list(selected)
+    request.session.modified = True
+
+    cart = {str(k): v for k, v in request.session.get("cart", {}).items()}
+
+    subtotal = Decimal("0.00")
+    discount_total = Decimal("0.00")
+
+    for pid, qty in cart.items():
+        if pid not in selected:
+            continue
+
+        product = Product.objects.get(id=pid)
+        qty = int(qty)
+
+        final_price, _, _ = calculate_discounted_price(product)
+        final_price = Decimal(str(final_price))
+        selling_price = Decimal(str(product.selling_price or 0))
+
+        subtotal += selling_price * qty
+        discount_total += (selling_price - final_price) * qty
+
+    total = subtotal - discount_total
+
+    return JsonResponse({
+        "subtotal": float(subtotal),
+        "discount_total": float(discount_total),
+        "total": float(total),
+        "selected_count": len(selected)
+    })
+
+def checkout_view(request):
+    guest_id = request.COOKIES.get("guest_id") or str(uuid.uuid4())
+
+    cart = request.session.get("cart", {})
+    selected = request.session.get("selected_items", list(cart.keys()))
+    selected = [str(x) for x in selected]
+
+    cart_items = []
+    subtotal = Decimal("0.00")
+    discount_total = Decimal("0.00")
+    total = Decimal("0.00")
+
+    customer = None
+    customer_id = request.session.get("customer_id")
+
+    if customer_id:
+        customer = Customer.objects.filter(id=customer_id).first()
+
+    for pid, qty in cart.items():
+        if str(pid) not in selected:
+            continue
+
+        product = Product.objects.get(id=pid)
+        qty = int(qty)
+
+        final_price, _, _ = calculate_discounted_price(product)
+        final_price = Decimal(str(final_price or 0))
+        price = Decimal(str(product.selling_price or 0))
+
+        line_original = price * qty
+        line_final = final_price * qty
+        line_discount = line_original - line_final
+
+        subtotal += line_original
+        discount_total += line_discount
+        total += line_final
+
+        cart_items.append({
+            "product": product,
+            "qty": qty,
+            "original_price": price,
+            "price": final_price,
+            "discount_amount": line_discount,
+        })
+
+    response = render(request, "customer/checkout.html", {
+        "cart_items": cart_items,
+        "subtotal": subtotal,
+        "discount_total": discount_total,
+        "total_amount": total,
+        "customer": customer,
+        "payment_choices": [
+            ("COD", "Cash on Delivery"),
+            # ("GCASH", "GCash"),
+        ],
+    })
+
+    response.set_cookie("guest_id", guest_id, max_age=60*60*24*30)
+    return response
+
+
+@transaction.atomic
+def process_sale(request):
+    if request.method != "POST":
+        return redirect("checkout")
+
+    guest_id = request.COOKIES.get("guest_id") or str(uuid.uuid4())
+
+    cart = request.session.get("cart", {})
+    selected = request.session.get("selected_items", list(cart.keys()))
+
+    full_name = request.POST.get("full_name") or "Walk-in Customer"
+    phone = request.POST.get("phone")
+    email = request.POST.get("email")
+    address = request.POST.get("address")
+    payment_method = request.POST.get("payment_method")
+
+    customer = None
+
+    if phone:
+        customer, created = Customer.objects.get_or_create(
+            phone=phone,
+            defaults={
+                "full_name": full_name,
+                "email": email,
+                "address": address,
+            }
+        )
+
+        if not created:
+            customer.full_name = full_name or customer.full_name
+            customer.email = email or customer.email
+            customer.address = address or customer.address
+            customer.save()
+
+    else:
+        customer_id = request.session.get("customer_id")
+
+        if customer_id:
+            customer = Customer.objects.filter(id=customer_id).first()
+
+        if not customer:
+            customer = Customer.objects.create(
+                full_name=full_name,
+                email=email,
+                address=address,
+            )
+
+    request.session["customer_id"] = customer.id
+
+    sale = Sale.objects.create(
+        customer=customer,
+        guest_id=guest_id,
+        payment_method=payment_method,
+        status="pending"
+    )
+
+    subtotal = Decimal("0.00")
+    discount_total = Decimal("0.00")
+
+    # =========================
+    # CART PROCESS
+    # =========================
+    for pid, qty in cart.items():
+
+        if str(pid) not in selected:
+            continue
+
+        product = Product.objects.get(id=pid)
+        qty = int(qty)
+
+        final_price, discount_obj, discount_pct = calculate_discounted_price(product)
+
+        original_price = Decimal(str(product.selling_price or 0))
+        final_price = Decimal(str(final_price or 0))
+
+        line_original = original_price * qty
+        line_final = final_price * qty
+        line_discount = line_original - line_final
+
+        subtotal += line_original
+        discount_total += line_discount
+
+        # =========================
+        # SAVE ITEM (FIXED)
+        # =========================
+        sale_item = SaleItem.objects.create(
+            sale=sale,
+            product=product,
+            quantity=qty,
+            unit_price=original_price,
+            line_total=line_final,
+
+            discount_name=getattr(discount_obj, "name", None),
+            discount_type=getattr(discount_obj, "type", None),
+            discount_pct=float(discount_pct or 0),
+            discount_amount=float(line_discount or 0),
+        )
+        StockMovement.objects.create(
+            product=product,
+            sale_item=sale_item,
+            type="out",
+            quantity=qty,
+            reason=f"Sale {sale.order_code}"
+        )
+
+        product.stock_qty = max((product.stock_qty or 0) - qty, 0)
+        product.save()
+
+    # =========================
+    # TOTALS
+    # =========================
+    sale.subtotal = subtotal
+    sale.discount_amount = float(discount_total)
+    sale.total_amount = float(subtotal - discount_total)
+    sale.save()
+
+    # =========================
+    # LOYALTY POINTS
+    # =========================
+    customer.loyalty_points = (customer.loyalty_points or 0) + int(sale.total_amount // 100)
+    customer.save()
+
+    # =========================
+    # CLEAR SESSION
+    # =========================
+    request.session["cart"] = {}
+    request.session["selected_items"] = []
+    request.session["last_order_code"] = str(sale.order_code)
+
+    response = redirect("dashboard")
+    response.set_cookie("guest_id", guest_id, max_age=60 * 60 * 24 * 30)
+
+    messages.success(request, "Order placed successfully!")
+    return response
+
+def orders_view(request):
+    customer = None
+    orders = []
+
+    guest_id = request.COOKIES.get("guest_id")
+
+    customer_id = request.session.get("customer_id")
+    if customer_id:
+        customer = Customer.objects.filter(id=customer_id).first()
+
+    if customer:
+        orders = Sale.objects.filter(customer=customer).order_by("-sale_date")
+
+    elif guest_id:
+        orders = Sale.objects.filter(guest_id=guest_id).order_by("-sale_date")
+
+    return render(request, "customer/orders/orders.html", {
+        "orders": orders,
+        "customer": customer,
+    })
+
+
+def order_detail(request, order_code):
+    phone = request.GET.get("phone")
+    order = get_object_or_404(Sale, order_code=order_code)
+
+
+    if not phone:
+        return redirect("order_history")  # prevent broken access
+
+    order = get_object_or_404(
+        Sale,
+        order_code=order_code,
+        customer__phone=phone
+    )
+    
+    return render(request, "customer/orders/order_detail.html", {
+        "order": order,
+        "phone": phone  # 👈 keep this!
+    })
+
+@require_POST
+def cancel_order(request, order_code):
+    sale = get_object_or_404(Sale, order_code=order_code)
+
+    if not sale.can_cancel():
+        return JsonResponse({'error': 'Cannot cancel this order'}, status=400)
+
+    with transaction.atomic():
+
+        for item in sale.sale_items.select_related("product"):
+
+            product = item.product
+
+            # 🔥 RESTORE STOCK
+            product.stock_qty = (product.stock_qty or 0) + item.quantity
+            product.save()
+
+            # 🔥 STOCK MOVEMENT LOG
+            StockMovement.objects.create(
+                product=product,
+                sale_item=item,
+                type="in",
+                quantity=item.quantity,
+                reason=f"Order Cancelled {sale.order_code}"
+            )
+
+        sale.status = 'cancelled'
+        sale.save()
+
+    return JsonResponse({'success': True})
+
+def track_order(request, order_code):
+
+    sale = get_object_or_404(Sale, order_code=order_code)
+    items = sale.sale_items.all()
+
+    # Timeline steps
+    steps = [
+        "pending",
+        "processing",
+        "shipped",
+        "completed",
+        "cancelled"
+    ]
+
+    status = (sale.status or "pending").lower()
+
+    current_index = 0
+    if status == "cancelled":
+        current_index = len(steps) - 1
+    elif status == "completed":
+        current_index = 3
+    elif status == "shipped":
+        current_index = 2
+    elif status == "processing":
+        current_index = 1
+    elif status == "pending":
+        current_index = 0
+
+
+    can_cancel = (
+        status in ["pending", "processing"] and
+        timezone.now() <= sale.sale_date + timedelta(hours=24)
+    )
+
+    progress_percent = 0
+    if len(steps) > 1:
+        progress_percent = (current_index / (len(steps) - 1)) * 100
+
+    context = {
+        "sale": sale,
+        "items": items,
+        "steps": steps,
+        "current_index": current_index,
+        "status": status,
+        "can_cancel": can_cancel,  # 👈 IMPORTANT
+        "progress_percent": progress_percent,
+    }
+
+    return render(request, "customer/orders/track_order.html", context)
+    
+def buy_again(request, order_code):
+
+    sale = get_object_or_404(Sale, order_code=order_code)
+
+    cart = {}
+    selected_items = []
+
+    for item in sale.sale_items.all():
+        pid = str(item.product.id)
+
+        cart[pid] = item.quantity
+        selected_items.append(pid)
+
+    # IMPORTANT: sync BOTH
+    request.session["cart"] = cart
+    request.session["selected_items"] = selected_items
+
+    request.session.modified = True
+
+    return redirect("checkout")
+
+def help_center(request):
+
+    help_data = HelpCenter.objects.first()
+
+    return render(request, "customer/help_page.html", {
+        "help": help_data
+    })
+
+def subscribe_newsletter(request):
+    if request.method == "POST":
+        email = request.POST.get("email")
+
+        if email:
+            obj, created = NewsletterSubscriber.objects.get_or_create(email=email)
+
+            if created:
+                messages.success(request, "Subscribed successfully!")
+            else:
+                messages.info(request, "You are already subscribed.")
+
+    return redirect(request.META.get("HTTP_REFERER", "/"))

@@ -1,0 +1,228 @@
+{% extends "panel/base.html" %}
+{% block content %}
+
+<!-- ================= HEADER ================= -->
+
+<div class="flex items-center justify-between mb-6">
+
+<div>
+    <h1 class="text-2xl font-semibold text-slate-800">Suppliers</h1>
+    <p class="text-sm text-slate-400">Manage supplier records</p>
+</div>
+
+<button onclick="openCreateModal()"
+    class="bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-sm">
+    + Add Supplier
+</button>
+
+</div>
+
+<!-- ================= TABLE ================= -->
+
+<div class="bg-white border rounded-xl shadow-sm overflow-visible">
+
+<table class="w-full text-sm">
+
+<thead class="bg-slate-900 text-white text-xs uppercase">
+<tr>
+    <th class="px-4 py-3 text-left">Supplier Name</th>
+    <th class="px-4 py-3 text-left">Contact Person</th>
+    <th class="px-4 py-3 text-left">Phone</th>
+    <th class="px-4 py-3 text-left">Email</th>
+    <th class="px-4 py-3 text-left">Address</th>
+    <th class="px-4 py-3 text-left w-20">Actions</th>
+</tr>
+</thead>
+
+<tbody>
+
+{% for s in suppliers %}
+
+<tr class="border-b hover:bg-slate-50">
+
+<td class="px-4 py-3 font-medium">{{ s.name }}</td>
+<td class="px-4 py-3">{{ s.contact_person }}</td>
+<td class="px-4 py-3">{{ s.phone }}</td>
+<td class="px-4 py-3">{{ s.email }}</td>
+<td class="px-4 py-3">{{ s.address }}</td>
+
+<!-- ACTIONS -->
+<td class="px-4 py-3 relative">
+
+    <button onclick="toggleMenu(event, '{{ s.id }}')"
+        class="p-2 hover:bg-slate-100 rounded">
+        ⋮
+    </button>
+
+    <div id="menu-{{ s.id }}"
+        class="hidden absolute right-4 top-10 w-40 bg-white border rounded-lg shadow z-20">
+
+        <!-- EDIT -->
+        <button
+            onclick="openEditModal(
+                '{{ s.id }}',
+                '{{ s.name|escapejs }}',
+                '{{ s.contact_person|escapejs }}',
+                '{{ s.phone|escapejs }}',
+                '{{ s.email|escapejs }}',
+                '{{ s.address|escapejs }}'
+            )"
+            class="w-full text-left px-4 py-2 hover:bg-slate-50">
+            Edit
+        </button>
+
+        <!-- DELETE (POST FIXED) -->
+        <!-- <form method="POST" action="{% url 'supplier_list' %}"> -->
+            {% csrf_token %}
+            <input type="hidden" name="action" value="delete">
+            <input type="hidden" name="id" value="{{ s.id }}">
+
+            <button type="submit"
+                onclick="return confirm('Delete this supplier?')"
+                class="w-full text-left px-4 py-2 text-red-600 hover:bg-red-50">
+                Delete
+            </button>
+        </form>
+
+    </div>
+
+</td>
+
+</tr>
+{% endfor %}
+
+</tbody>
+</table>
+
+</div>
+
+<!-- ================= MODAL ================= -->
+
+<div id="modal" class="fixed inset-0 hidden z-50">
+
+<div class="absolute inset-0 bg-black/50"></div>
+
+<div class="relative flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-white w-full max-w-lg rounded-xl shadow-xl">
+
+        <!-- HEADER -->
+        <div class="flex justify-between items-center px-6 py-4 border-b">
+            <h2 id="modalTitle" class="text-lg font-semibold"></h2>
+            <button onclick="closeModal()" class="text-2xl">×</button>
+        </div>
+
+        <!-- FORM -->
+        <form method="POST">
+            {% csrf_token %}
+
+            <input type="hidden" name="action" id="action">
+            <input type="hidden" name="id" id="supplierId">
+
+            <div class="p-6 space-y-3">
+
+                <input name="name" id="name"
+                    class="w-full border p-2 rounded"
+                    placeholder="Supplier Name">
+
+                <input name="contact_person" id="contact_person"
+                    class="w-full border p-2 rounded"
+                    placeholder="Contact Person">
+
+                <input name="phone" id="phone"
+                    class="w-full border p-2 rounded"
+                    placeholder="Phone">
+
+                <input name="email" id="email"
+                    class="w-full border p-2 rounded"
+                    placeholder="Email">
+
+                <input name="address" id="address"
+                    class="w-full border p-2 rounded"
+                    placeholder="Address">
+
+            </div>
+
+            <div class="flex justify-end gap-2 p-6 border-t">
+
+                <button type="button"
+                    onclick="closeModal()"
+                    class="px-4 py-2 border rounded">
+                    Cancel
+                </button>
+
+                <button type="submit"
+                    class="px-4 py-2 bg-slate-900 text-white rounded">
+                    Save
+                </button>
+
+            </div>
+
+        </form>
+
+    </div>
+
+</div>
+
+</div>
+
+<!-- ================= JS ================= -->
+
+<script>
+
+let openMenuId = null;
+
+/* MENU TOGGLE */
+function toggleMenu(event, id) {
+    event.stopPropagation();
+
+    if (openMenuId && openMenuId !== id) {
+        document.getElementById("menu-" + openMenuId)?.classList.add("hidden");
+    }
+
+    const menu = document.getElementById("menu-" + id);
+    menu.classList.toggle("hidden");
+
+    openMenuId = id;
+}
+
+/* CLOSE OUTSIDE CLICK */
+document.addEventListener("click", function () {
+    if (openMenuId) {
+        document.getElementById("menu-" + openMenuId)?.classList.add("hidden");
+        openMenuId = null;
+    }
+});
+
+/* MODAL */
+function openCreateModal() {
+    document.getElementById("modal").classList.remove("hidden");
+
+    document.getElementById("modalTitle").innerText = "Add Supplier";
+    document.getElementById("action").value = "create";
+    document.getElementById("supplierId").value = "";
+
+    document.querySelector("#modal form").reset();
+}
+
+function openEditModal(id, name, contact, phone, email, address) {
+    document.getElementById("modal").classList.remove("hidden");
+
+    document.getElementById("modalTitle").innerText = "Edit Supplier";
+    document.getElementById("action").value = "update";
+    document.getElementById("supplierId").value = id;
+
+    document.getElementById("name").value = name;
+    document.getElementById("contact_person").value = contact;
+    document.getElementById("phone").value = phone;
+    document.getElementById("email").value = email;
+    document.getElementById("address").value = address;
+}
+
+function closeModal() {
+    document.getElementById("modal").classList.add("hidden");
+}
+
+</script>
+
+{% endblock %}

@@ -1,0 +1,199 @@
+{% extends 'customer/base.html' %}
+{% load static %}
+
+{% block content %}
+
+<div class="w-full px-4 md:px-6 lg:px-10 py-10">
+
+  <!-- HEADER -->
+  <div class="mb-8">
+    <h1 class="text-3xl font-semibold text-stone-900 tracking-tight">
+      Checkout
+    </h1>
+    <p class="text-sm text-stone-500 mt-1">
+      Complete your purchase safely and securely
+    </p>
+  </div>
+
+  <form action="{% url 'process_sale' %}" method="POST" id="checkout-form">
+    {% csrf_token %}
+
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+
+      <!-- LEFT SIDE -->
+      <div class="xl:col-span-2 space-y-6">
+
+        <!-- CUSTOMER INFO -->
+        <div class="bg-white border border-stone-100 rounded-2xl p-6 shadow-sm">
+
+          <h2 class="text-sm font-semibold text-stone-900 mb-5">
+            Customer Information
+          </h2>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+            <input type="text" name="full_name" id="full_name"
+              value="{{ customer.full_name|default:'' }}"
+              placeholder="Full Name"
+              class="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-black outline-none text-sm">
+
+            <input type="text" name="phone" id="phone"
+              value="{{ customer.phone|default:'' }}"
+              placeholder="Phone Number"
+              class="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-black outline-none text-sm">
+
+            <input type="email" name="email" id="email"
+              value="{{ customer.email|default:'' }}"
+              placeholder="Email Address"
+              class="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-black outline-none text-sm md:col-span-2">
+
+            <input type="text" name="address" id="address"
+              value="{{ customer.address|default:'' }}"
+              placeholder="Delivery Address"
+              class="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-black outline-none text-sm md:col-span-2">
+
+          </div>
+
+          <input type="hidden" name="customer_id" id="customer_id">
+
+        </div>
+
+        <!-- PAYMENT -->
+        <div class="bg-white border border-stone-100 rounded-2xl p-6 shadow-sm">
+
+          <h2 class="text-sm font-semibold text-stone-900 mb-5">
+            Payment Method
+          </h2>
+
+          <div class="space-y-3">
+
+            {% for value, name in payment_choices %}
+            <label class="flex items-center gap-3 p-4 border border-stone-200 rounded-xl cursor-pointer hover:border-stone-400 transition">
+
+              <input type="radio"
+                     name="payment_method"
+                     value="{{ value }}"
+                     {% if forloop.first %}checked{% endif %}
+                     class="accent-black">
+
+              <div>
+                <p class="text-sm font-medium text-stone-900">{{ name }}</p>
+                <p class="text-xs text-stone-400">Secure payment</p>
+              </div>
+
+            </label>
+            {% endfor %}
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- RIGHT SIDE -->
+      <aside class="xl:col-span-1">
+
+        <div class="bg-white border border-stone-100 rounded-2xl p-6 shadow-sm sticky top-6">
+
+          <h2 class="text-sm font-semibold text-stone-900 mb-5">
+            Order Summary
+          </h2>
+
+          <!-- ITEMS -->
+          <div class="space-y-4 max-h-[300px] overflow-y-auto pr-1">
+
+            {% for item in cart_items %}
+            <div class="flex gap-3">
+
+              <img src="{{ item.product.img.url }}"
+                   class="w-12 h-12 rounded-xl object-cover border border-stone-100">
+
+              <div class="flex-1">
+                <p class="text-sm font-medium text-stone-900">
+                  {{ item.product.name }}
+                </p>
+                <p class="text-xs text-stone-500">
+                  Qty {{ item.qty }}
+                </p>
+              </div>
+
+              <div class="text-xs font-medium text-stone-900">
+                ₱{{ item.original_price|floatformat:2 }}
+              </div>
+
+            </div>
+            {% endfor %}
+
+          </div>
+
+          <hr class="my-5 border-stone-200">
+
+          <!-- TOTALS -->
+          <div class="space-y-3 text-sm">
+
+            <div class="flex justify-between text-stone-600">
+              <span>Subtotal</span>
+              <span>₱{{ subtotal|default:0|floatformat:2 }}</span>
+            </div>
+
+            <div class="flex justify-between text-stone-600">
+              <span>Discount</span>
+              <span>
+                -₱{{ discount_total|default:0|floatformat:2 }}
+              </span>
+            </div>
+
+            <div class="flex justify-between font-semibold text-stone-900 text-base pt-2 border-t">
+              <span>Total</span>
+              <span>₱{{ total_amount|default:0|floatformat:2 }}</span>
+            </div>
+
+          </div>
+
+          <!-- BUTTON -->
+          <button type="submit"
+                  class="w-full mt-6 bg-black text-white py-3 rounded-xl hover:bg-stone-800 transition text-sm font-medium">
+            Place Order
+          </button>
+
+          <p class="text-[11px] text-stone-400 text-center mt-3">
+            Secure checkout powered by DMEP
+          </p>
+
+        </div>
+
+      </aside>
+
+    </div>
+  </form>
+
+</div>
+
+<!-- GUEST AUTO-FILL -->
+<script>
+  document.getElementById("phone").addEventListener("blur", function () {
+
+    const phone = this.value;
+    if (!phone) return;
+
+    fetch(`/ajax/customer-by-phone/?phone=${phone}`)
+        .then(res => res.json())
+        .then(data => {
+
+            if (data.exists) {
+                document.getElementById("customer_id").value = data.id;
+                document.getElementById("full_name").value = data.full_name;
+                document.getElementById("email").value = data.email;
+                document.getElementById("address").value = data.address;
+            } else {
+                document.getElementById("customer_id").value = "";
+            }
+
+        });
+
+});
+
+
+</script>
+
+{% endblock %}
